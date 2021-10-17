@@ -1,5 +1,6 @@
 //! A Wesnoth server for playing over email. Not close to ready for use.
 mod wml;
+mod stream;
 
 use ::core::cmp::Ordering;
 use ::tokio::io::{AsyncReadExt, AsyncWriteExt};
