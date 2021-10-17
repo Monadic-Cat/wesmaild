@@ -1,4 +1,5 @@
 //! A protocol wrapper for Wesnoth message streams on top of TCP.
+use ::core::convert::TryInto;
 use ::tokio::io::{AsyncReadExt, AsyncWriteExt};
 use ::tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use ::tokio::net::TcpStream;
@@ -61,6 +62,19 @@ pub struct Writer {
 }
 impl Writer {
     fn from_raw(half: OwnedWriteHalf) -> Self { Self { half } }
+    pub async fn write(&mut self, msg: &[u8]) -> ::std::io::Result<()> {
+        use ::flate2::write::GzEncoder;
+        use ::flate2::Compression;
+        use ::std::io::Write;
+        let mut gz_buf = vec![0; 4];
+        {
+            let mut gz = GzEncoder::new(&mut gz_buf, Compression::fast());
+            gz.write_all(msg)?;
+        }
+        let len = gz_buf.len() - 4;
+        gz_buf[..4].copy_from_slice(&u32::to_be_bytes(len.try_into().unwrap()));
+        self.half.write_all(&gz_buf).await
+    }
 }
 
 /// `wesnothd` uses `htonl(42)` into a union with `char buf[4]` to accomplish this.
