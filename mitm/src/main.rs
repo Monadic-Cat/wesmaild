@@ -1,10 +1,11 @@
 //! A tool for inspecting traffic between a Wesnoth client and the `wesnothd` server.
+
 use ::tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use ::tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use ::tokio::net::{TcpListener, TcpStream};
+use ::tokio::sync::mpsc;
 
-
-async fn run_middle(mut reader: OwnedReadHalf, mut writer: OwnedWriteHalf, mut on_msg: impl FnMut(&[u8])) {
+async fn run_middle(_shutdown: mpsc::Sender<()>, mut reader: OwnedReadHalf, mut writer: OwnedWriteHalf, mut on_msg: impl FnMut(&[u8])) {
     let mut buf = Vec::with_capacity(1024);
     loop {
         match reader.read_buf(&mut buf).await {
@@ -115,28 +116,51 @@ fn process_msg(side: Side) -> impl FnMut(&[u8]) {
 
 
 #[::tracing::instrument]
-async fn start_session(client: TcpStream) -> Result<(), ()> {
+async fn start_session(shutdown: mpsc::Sender<()>, client: TcpStream) -> Result<(), ()> {
     let (client_rx, client_tx) = client.into_split();
     let (server_rx, server_tx) = TcpStream::connect("127.0.0.1:15000").await.map_err(|_| ())?.into_split();
-    ::tokio::spawn(run_middle(client_rx, server_tx, process_msg(Side::Client)));
-    ::tokio::spawn(run_middle(server_rx, client_tx, process_msg(Side::Server)));
+    ::tokio::spawn(run_middle(shutdown.clone(), client_rx, server_tx, process_msg(Side::Client)));
+    ::tokio::spawn(run_middle(shutdown, server_rx, client_tx, process_msg(Side::Server)));
     Ok(())
 }
 
 #[::tokio::main]
 async fn main() {
     // install global collector configured based on RUST_LOG env var.
-    tracing_subscriber::fmt::init();
+    let file_appender = ::tracing_appender::rolling::hourly("log", "mitm.log");
+    let (non_blocking, _guard) = ::tracing_appender::non_blocking(file_appender);
+    tracing_subscriber::fmt().with_writer(non_blocking).init();
     let listener = TcpListener::bind("127.0.0.1:10900").await.unwrap();
+    let (shutdown_tx, mut shutdown_rx) = mpsc::channel(1);
     loop {
-        match listener.accept().await {
-            Ok((stream, _)) => {
-                ::tracing::info!("starting new session...");
-                ::tokio::spawn(start_session(stream));
-            },
-            Err(e) => {
-                ::tracing::warn!("failed to accept a connection: {:?}", e);
-            },
+        ::tokio::select! {
+            _res = ::tokio::signal::ctrl_c() => {
+                println!("\nCTRL-C pressed. No longer accepting new connections...");
+                break
+            }
+            res = listener.accept() => {
+                match res {
+                    Ok((stream, _)) => {
+                        ::tracing::info!("starting new session...");
+                        ::tokio::spawn(start_session(shutdown_tx.clone(), stream));
+                    },
+                    Err(e) => {
+                        ::tracing::warn!("failed to accept a connection: {:?}", e);
+                    },
+                }
+            }
+        }
+    }
+    drop(shutdown_tx);
+
+    ::tokio::select! {
+        _res = ::tokio::signal::ctrl_c() => {
+            println!("\nCTRL-C pressed a second time. Exiting immediately.");
+        }
+        // When every sender has gone out of scope, the recv call
+        // will return with an error. We ignore the error.
+        _ = shutdown_rx.recv() => {
+            println!("No remaining active sessions. Exiting.");
         }
     }
 }
