@@ -253,8 +253,9 @@ impl<'a> Attribute<'a> {
             .map(|(rest, domain)| (rest, Some(domain)))
             .unwrap_or_else(|()| (input, None));
         let offset = |slc: &[u8]| slc.as_ptr() as usize - input.as_ptr() as usize + offset;
+        let rest = tagged_many0(b" ".or(b"\t"), rest);
         let (rest, key_sequence) = KeySequence::parse(arena, rest, offset(rest))?;
-        println!("{}", e.get_str(key_sequence.first.content).unwrap());
+        println!("Attribute: {}", e.get_str(key_sequence.first.content).unwrap());
         let rest = tagged(b"=", rest)?;
         let (rest, value) = Value::parse(e, arena, rest, offset(rest))?;
         let rest = tagged(b"\n", rest)?;
