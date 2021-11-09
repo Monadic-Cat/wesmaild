@@ -1,0 +1,11 @@
+[package]
+name = "wml"
+version = "0.1.0"
+authors = ["Monadic Cat <greenmonadcat@gmail.com>"]
+description = "A Wesnoth Markup Language (WML) parsing and serializing library"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+bumpalo = { version = "3.8.0", features = ["boxed", "collections"] }
