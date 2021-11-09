@@ -56,7 +56,7 @@ impl From<NoWhitespace> for () {
 
 // TODO: use this more, presumably?
 /// Consume whitespace however the official WML tokenizer would.
-fn expect_whitespace(input: &[u8]) -> Result<&[u8], NoWhitespace> {
+fn whitespace(input: &[u8]) -> Result<&[u8], NoWhitespace> {
     let mut cursor = input;
     while let [b' ' | b'\t', rest @ ..] = cursor {
         cursor = rest;
@@ -65,6 +65,15 @@ fn expect_whitespace(input: &[u8]) -> Result<&[u8], NoWhitespace> {
         Ok(cursor)
     } else {
         Err(NoWhitespace)
+    }
+}
+
+fn tagged_many0<'a>(tag: &[u8], input: &'a [u8]) -> &'a [u8] {
+    let mut cursor = input;
+    loop {
+        if cursor.starts_with(tag) {
+            cursor = &cursor[tag.len()..];
+        } else { break cursor }
     }
 }
 
@@ -126,6 +135,7 @@ impl<'a> Tag<'a> {
         let rest = tagged(b"[", input)?;
         let (rest, name) = Name::parse(rest, offset(rest))?;
         let rest = tagged(b"]", rest)?;
+        let rest = tagged_many0(b"\n", rest);
         // TODO: parse without recursing, or otherwise prevent stack overflows
         // (consider using `stacker` to be lazy)
         let mut cursor = rest;
@@ -151,6 +161,7 @@ impl<'a> Tag<'a> {
         let name_again = &input[name_again_base .. name_again_base + name_again.content.len];
         if name_c != name_again { return Err(()) }
         let rest = tagged(b"]", rest)?;
+        let rest = tagged_many0(b"\n", rest);
         Ok((rest, Self { name, content }))
     }
 }
@@ -426,7 +437,7 @@ impl TextDomain {
         let rest = tagged(b"#textdomain", input)?;
         // TODO: verify that this is needed here,
         // or if we should just scroll over whitespace or something
-        let rest = expect_whitespace(rest)?;
+        let rest = whitespace(rest)?;
         let mut cursor = rest;
         while let [b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'-', rest @ ..] = cursor {
             cursor = rest;
@@ -505,16 +516,20 @@ mod tests {
     fn parse_attr() {
         let processor = DocProcessor::new();
         let input = IntoIter::new(*b"lol=\"hello\"\n").collect::<Vec<u8>>();
-        let doc = processor.parse(input).unwrap();
-        dbg!(doc);
-        dbg!(processor);
+        let _doc = processor.parse(input).unwrap();
     }
 
     #[test]
     fn parse_users() {
         let processor = DocProcessor::new();
         let users = Vec::from("[user]\navailable=\"yes\"\nforum_id=\"0\"\ngame_id=\"0\"\nlocation=\"\"\nmoderator=\"no\"\nname=\"lol\"\nregistered=\"no\"\nstatus=\"lobby\"\n[/user]\n[user]\navailable=\"yes\"\nforum_id=\"0\"\ngame_id=\"0\"\nlocation=\"\"\nmoderator=\"no\"\nname=\"haha\"\nregistered=\"no\"\nstatus=\"lobby\"\n[/user]\n");
-        let doc = processor.parse(users).unwrap();
-        dbg!(doc);
+        let _doc = processor.parse(users).unwrap();
+    }
+
+    #[test]
+    fn parse_empty_tag() {
+        let processor = DocProcessor::new();
+        let game_list = Vec::from("[gamelist]\n\n[/gamelist]");
+        let _doc = processor.parse(game_list).unwrap();
     }
 }
