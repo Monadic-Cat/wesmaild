@@ -457,7 +457,7 @@ impl TextDomain {
 }
 
 #[derive(Debug)]
-struct Doc<'a> {
+pub struct Doc<'a> {
     top: bump::Vec<'a, TagOrAttr<'a>>,
     text: Vec<u8>,
 }
@@ -467,7 +467,7 @@ struct Doc<'a> {
 // with one thread per core we're willing to consume.
 /// A document processor, meant to process WML documents serially and reuse memory between them.
 #[derive(Debug)]
-struct DocProcessor {
+pub struct DocProcessor {
     // The lifetime carrying collections of `bumpalo` are what forced me to
     // introduce this `DocProcessor` struct.
     arena: Bump,
@@ -475,17 +475,17 @@ struct DocProcessor {
 }
 
 impl DocProcessor {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             arena: Bump::new(),
         }
     }
     /// Nuke all parsed stuff.
     /// See [`Bump::reset`].
-    fn reset(&mut self) {
+    pub fn reset(&mut self) {
         self.arena.reset()
     }
-    fn parse(&self, buf: Vec<u8>) -> Result<Doc<'_>, ()> {
+    pub fn parse(&self, buf: Vec<u8>) -> Result<Doc<'_>, ()> {
         // TODO: this would benefit from `with_capacity_in`
         let mut top = bump::Vec::new_in(&self.arena);
         let mut cursor = &*buf;
