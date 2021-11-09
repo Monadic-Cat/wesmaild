@@ -456,6 +456,7 @@ impl TextDomain {
     }
 }
 
+/// A WML document.
 #[derive(Debug)]
 pub struct Doc<'a> {
     top: bump::Vec<'a, TagOrAttr<'a>>,
