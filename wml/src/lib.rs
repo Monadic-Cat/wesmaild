@@ -27,7 +27,10 @@
 //! that the Wesnoth client accepts a wider range of inputs than does this parser.
 //!
 //! Additionally, this parser is not hardened against inputs crafted to cause stack overflows.
+mod effects;
+
 use ::bumpalo::Bump;
+use effects::Effects;
 
 mod bump {
     pub use ::bumpalo::boxed::Box;
@@ -68,17 +71,46 @@ fn whitespace(input: &[u8]) -> Result<&[u8], NoWhitespace> {
     }
 }
 
-fn tagged_many0<'a>(tag: &[u8], input: &'a [u8]) -> &'a [u8] {
+struct Or<A, B> {
+    a: A,
+    b: B,
+}
+
+trait StripPredicate {
+    fn count(&self, input: &[u8]) -> usize;
+    fn or<P: StripPredicate>(self, other: P) -> Or<Self, P> where Self: Sized {
+        Or { a: self, b: other }
+    }
+}
+impl<A: StripPredicate, B: StripPredicate> StripPredicate for Or<A, B> {
+    fn count(&self, input: &[u8]) -> usize {
+        let count = self.a.count(input);
+        if count > 0 { count } else { self.b.count(input) }
+    }
+}
+impl StripPredicate for &[u8] {
+    fn count(&self, input: &[u8]) -> usize {
+        if input.starts_with(self) { self.len() } else { 0 }
+    }
+}
+impl<const N: usize> StripPredicate for &[u8; N] {
+    fn count(&self, input: &[u8]) -> usize {
+        if input.starts_with(*self) { self.len() } else { 0 }
+    }
+}
+
+fn tagged_many0<'a, P: StripPredicate>(tag: P, input: &'a [u8]) -> &'a [u8] {
     let mut cursor = input;
     loop {
-        if cursor.starts_with(tag) {
-            cursor = &cursor[tag.len()..];
+        let count = tag.count(cursor);
+        if count > 0 {
+            cursor = &cursor[count..];
         } else { break cursor }
     }
 }
 
 /// Key for retrieving a slice of bytes for a string.
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone)]
 struct StringKey {
     // I'll add a layer of indirection if I make changes that make indices unstable,
     // like allowing mutation.
@@ -102,12 +134,12 @@ enum TagOrAttr<'a> {
     Attr(Attribute<'a>),
 }
 impl<'a> TagOrAttr<'a> {
-    fn parse<'b>(arena: &'a Bump, input: &'b [u8], offset: usize) -> PResult<'b, Self, ()> {
+    fn parse<'b, E: Effects>(e: &E, arena: &'a Bump, input: &'b [u8], offset: usize) -> PResult<'b, Self, ()> {
         // Right here, `Tag::parse` may recurse.
-        Tag::parse(arena, input, offset)
+        Tag::parse(e, arena, input, offset)
             .map(|(rest, tag)| (rest, Self::Tag(tag)))
             .or_else(|()| {
-                Attribute::parse(arena, input, offset).map(|(rest, attr)| (rest, Self::Attr(attr)))
+                Attribute::parse(e, arena, input, offset).map(|(rest, attr)| (rest, Self::Attr(attr)))
             })
     }
 }
@@ -130,20 +162,24 @@ struct Tag<'a> {
 // Note: `Tag`, and *only* `Tag`, is recursive.
 // Alternatively, `TagOrAttr` could possibly handle the recursion?
 impl<'a> Tag<'a> {
-    fn parse<'b>(arena: &'a Bump, input: &'b [u8], offset: usize) -> PResult<'b, Self, ()> {
+    fn parse<'b, E: Effects>(e: &E, arena: &'a Bump, input: &'b [u8], offset: usize) -> PResult<'b, Self, ()> {
         let offset = |slc: &[u8]| slc.as_ptr() as usize - input.as_ptr() as usize + offset;
         let rest = tagged(b"[", input)?;
         let (rest, name) = Name::parse(rest, offset(rest))?;
         let rest = tagged(b"]", rest)?;
-        let rest = tagged_many0(b"\n", rest);
+        let rest = tagged_many0(b"\n".or(b"\t"), rest);
         // TODO: parse without recursing, or otherwise prevent stack overflows
         // (consider using `stacker` to be lazy)
         let mut cursor = rest;
         // TODO: this *would* benefit from using `with_capacity_in`
         let mut content = bump::Vec::<TagOrAttr>::new_in(arena);
+        let mut count = 0;
         loop {
+            println!("Hm: {}", count);
+            count += 1;
+            cursor = tagged_many0(b"\n".or(b"\t"), cursor);
             // Every single tag or attribute in here is optional.
-            match TagOrAttr::parse(arena, cursor, offset(cursor)) {
+            match TagOrAttr::parse(e, arena, cursor, offset(cursor)) {
                 Ok((rest, tag_or_attr)) => {
                     content.push(tag_or_attr);
                     cursor = rest;
@@ -161,7 +197,7 @@ impl<'a> Tag<'a> {
         let name_again = &input[name_again_base .. name_again_base + name_again.content.len];
         if name_c != name_again { return Err(()) }
         let rest = tagged(b"]", rest)?;
-        let rest = tagged_many0(b"\n", rest);
+        let rest = tagged_many0(b"\n".or(b"\t"), rest);
         Ok((rest, Self { name, content }))
     }
 }
@@ -212,14 +248,15 @@ struct Attribute<'a> {
     value: Value<'a>,
 }
 impl<'a> Attribute<'a> {
-    fn parse<'b>(arena: &'a Bump, input: &'b [u8], offset: usize) -> PResult<'b, Self, ()> {
-        let (rest, domain) = TextDomain::parse(input, offset)
+    fn parse<'b, E: Effects>(e: &E, arena: &'a Bump, input: &'b [u8], offset: usize) -> PResult<'b, Self, ()> {
+        let (rest, domain) = TextDomain::parse(e, input, offset)
             .map(|(rest, domain)| (rest, Some(domain)))
             .unwrap_or_else(|()| (input, None));
         let offset = |slc: &[u8]| slc.as_ptr() as usize - input.as_ptr() as usize + offset;
         let (rest, key_sequence) = KeySequence::parse(arena, rest, offset(rest))?;
+        println!("{}", e.get_str(key_sequence.first.content).unwrap());
         let rest = tagged(b"=", rest)?;
-        let (rest, value) = Value::parse(arena, rest, offset(rest))?;
+        let (rest, value) = Value::parse(e, arena, rest, offset(rest))?;
         let rest = tagged(b"\n", rest)?;
         Ok((rest, Self { domain, key_sequence, value }))
     }
@@ -266,8 +303,8 @@ struct Value<'a> {
     rest: bump::Vec<'a, (Option<TextDomain>, ValueComponent)>,
 }
 impl<'a> Value<'a> {
-    fn parse<'b>(arena: &'a Bump, input: &'b [u8], offset: usize) -> PResult<'b, Self, ()> {
-        let (rest, first) = ValueComponent::parse(input, offset)?;
+    fn parse<'b, E: Effects>(e: &E, arena: &'a Bump, input: &'b [u8], offset: usize) -> PResult<'b, Self, ()> {
+        let (rest, first) = ValueComponent::parse(e, input, offset)?;
         let offset = |slc: &[u8]| slc.as_ptr() as usize - input.as_ptr() as usize + offset;
         let mut cursor = rest;
         // Note: Since `Value` has no children that use the arena allocator,
@@ -280,7 +317,7 @@ impl<'a> Value<'a> {
                     let (rest, domain) = match tagged(b"\n", rest) {
                         Ok(rest) => {
                             // Check for textdomain, which is still optional at this point
-                            match TextDomain::parse(input, offset(rest)) {
+                            match TextDomain::parse(e, input, offset(rest)) {
                                 Ok((rest, domain)) => {
                                     (rest, Some(domain))
                                 },
@@ -290,7 +327,7 @@ impl<'a> Value<'a> {
                         Err(()) => (rest, None),
                     };
                     // Consume value component, not optional at this point
-                    let (rest, next) = ValueComponent::parse(rest, offset(rest))?;
+                    let (rest, next) = ValueComponent::parse(e, rest, offset(rest))?;
                     vec.push((domain, next));
                     cursor = rest;
                 },
@@ -315,22 +352,34 @@ enum ValueComponent {
     RawString(RawString),
 }
 impl ValueComponent {
-    fn parse(input: &[u8], offset: usize) -> PResult<Self, ()> {
+    fn parse<'a, E: Effects>(e: &E, input: &'a [u8], offset: usize) -> PResult<'a, Self, ()> {
         // TODO: fix order these are checked?
-        Text::parse(input, offset).map(|(rest, txt)| (rest, Self::Text(txt)))
-            .or_else(|()| {
-                let (rest, offset) = match tagged(b"_", input) {
-                    Ok(rest) => (rest, offset + 1),
-                    Err(()) => (input, offset),
-                };
-                WString::parse(rest, offset).map(|(rest, s)| (rest, Self::String(s)))
-            }).or_else(|()| {
-                let (rest, offset) = match tagged(b"_", input) {
-                    Ok(rest) => (rest, offset + 1),
-                    Err(()) => (input, offset),
-                };
-                RawString::parse(rest, offset).map(|(rest, r)| (rest, Self::RawString(r)))
+        let mut underscored = false;
+        let (rest, offset) = match tagged(b"_", input) {
+            Ok(rest) => {
+                underscored = true;
+                (rest, offset + 1)
+            },
+            Err(()) => (input, offset),
+        };
+        WString::parse(rest, offset).map(|(rest, s)| {
+            println!("String: {}", e.get_str(s.content).unwrap());
+            (rest, Self::String(s))
+        }).or_else(|()| {
+            RawString::parse(rest, offset).map(|(rest, r)| {
+                println!("Raw String: {}", e.get_str(r.content).unwrap());
+                (rest, Self::RawString(r))
             })
+        }).or_else(|()| {
+            if !underscored {
+                Text::parse(input, offset).map(|(rest, txt)| {
+                    println!("Text: {}", e.get_str(txt.content).unwrap());
+                    (rest, Self::Text(txt))
+                })
+            } else {
+                Err(())
+            }
+        })
     }
 }
 
@@ -377,7 +426,7 @@ impl WString {
         let mut cursor = rest;
         while let &[a, b, ref rest @ ..] = cursor {
             if a != b'"' || (a == b'"' && b == b'"') {
-                cursor = rest;
+                cursor = &cursor[1..];
             } else {
                 break
             }
@@ -407,7 +456,7 @@ impl RawString {
         let mut cursor = rest;
         while let &[a, b, ref rest @ ..] = cursor {
             if a != b'>' || b != b'>' {
-                cursor = rest;
+                cursor = &cursor[1..];
             } else {
                 break
             }
@@ -433,7 +482,7 @@ struct TextDomain {
     name: StringKey,
 }
 impl TextDomain {
-    fn parse(input: &[u8], offset: usize) -> PResult<Self, ()> {
+    fn parse<'a, E: Effects>(e: &E, input: &'a [u8], offset: usize) -> PResult<'a, Self, ()> {
         let rest = tagged(b"#textdomain", input)?;
         // TODO: verify that this is needed here,
         // or if we should just scroll over whitespace or something
@@ -448,6 +497,7 @@ impl TextDomain {
                 idx: rest.as_ptr() as usize - input.as_ptr() as usize + offset,
                 len,
             };
+            println!("Textdomain: {}", e.get_str(name).unwrap());
             let rest = tagged(b"\n", cursor)?;
             Ok((rest, Self { name }))
         } else {
@@ -490,8 +540,9 @@ impl DocProcessor {
         // TODO: this would benefit from `with_capacity_in`
         let mut top = bump::Vec::new_in(&self.arena);
         let mut cursor = &*buf;
+        let printer = effects::Printer::new(cursor);
         let offset = |slc: &[u8]| slc.as_ptr() as usize - buf.as_ptr() as usize;
-        while let Ok((rest, tag_or_attr)) = TagOrAttr::parse(&self.arena, cursor, offset(cursor)) {
+        while let Ok((rest, tag_or_attr)) = TagOrAttr::parse(&printer, &self.arena, cursor, offset(cursor)) {
             cursor = rest;
             top.push(tag_or_attr);
         }
