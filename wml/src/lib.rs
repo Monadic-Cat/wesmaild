@@ -173,10 +173,7 @@ impl<'a> Tag<'a> {
         let mut cursor = rest;
         // TODO: this *would* benefit from using `with_capacity_in`
         let mut content = bump::Vec::<TagOrAttr>::new_in(arena);
-        let mut count = 0;
         loop {
-            println!("Hm: {}", count);
-            count += 1;
             cursor = tagged_many0(b"\n".or(b"\t"), cursor);
             // Every single tag or attribute in here is optional.
             match TagOrAttr::parse(e, arena, cursor, offset(cursor)) {
@@ -255,7 +252,6 @@ impl<'a> Attribute<'a> {
         let offset = |slc: &[u8]| slc.as_ptr() as usize - input.as_ptr() as usize + offset;
         let rest = tagged_many0(b" ".or(b"\t"), rest);
         let (rest, key_sequence) = KeySequence::parse(arena, rest, offset(rest))?;
-        println!("Attribute: {}", e.get_str(key_sequence.first.content).unwrap());
         let rest = tagged(b"=", rest)?;
         let (rest, value) = Value::parse(e, arena, rest, offset(rest))?;
         let rest = tagged(b"\n", rest)?;
@@ -313,21 +309,25 @@ impl<'a> Value<'a> {
         // we appropriately do `with_capacity_in` or not.
         let mut vec = bump::Vec::new_in(arena);
         loop {
-            match tagged(b"+", cursor) {
+            let rest = tagged_many0(b" ".or(b"\n").or(b"\t"), cursor);
+            match tagged(b"+", rest) {
                 Ok(rest) => {
-                    let (rest, domain) = match tagged(b"\n", rest) {
-                        Ok(rest) => {
+                    let (rest, domain) = match tagged_many0(b"\n".or(b" ").or(b"\t"), rest) {
+                        rest => {
                             // Check for textdomain, which is still optional at this point
-                            match TextDomain::parse(e, input, offset(rest)) {
+                            match TextDomain::parse(e, rest, offset(rest)) {
                                 Ok((rest, domain)) => {
                                     (rest, Some(domain))
                                 },
-                                Err(()) => (rest, None),
+                                Err(()) => {
+                                    (rest, None)
+                                },
                             }
                         },
-                        Err(()) => (rest, None),
+                        // Err(()) => (rest, None),
                     };
                     // Consume value component, not optional at this point
+                    let rest = tagged_many0(b"\n".or(b" ").or(b"\t"), rest);
                     let (rest, next) = ValueComponent::parse(e, rest, offset(rest))?;
                     vec.push((domain, next));
                     cursor = rest;
@@ -364,17 +364,14 @@ impl ValueComponent {
             Err(()) => (input, offset),
         };
         WString::parse(rest, offset).map(|(rest, s)| {
-            println!("String: {}", e.get_str(s.content).unwrap());
             (rest, Self::String(s))
         }).or_else(|()| {
             RawString::parse(rest, offset).map(|(rest, r)| {
-                println!("Raw String: {}", e.get_str(r.content).unwrap());
                 (rest, Self::RawString(r))
             })
         }).or_else(|()| {
             if !underscored {
                 Text::parse(input, offset).map(|(rest, txt)| {
-                    println!("Text: {}", e.get_str(txt.content).unwrap());
                     (rest, Self::Text(txt))
                 })
             } else {
@@ -425,9 +422,11 @@ impl WString {
     fn parse(input: &[u8], offset: usize) -> PResult<Self, ()> {
         let rest = tagged(b"\"", input)?;
         let mut cursor = rest;
-        while let &[a, b, ref rest @ ..] = cursor {
-            if a != b'"' || (a == b'"' && b == b'"') {
+        while let &[a, b, ..] = cursor {
+            if a != b'"' {
                 cursor = &cursor[1..];
+            } else if b == b'"' {
+                cursor = &cursor[2..];
             } else {
                 break
             }
@@ -455,7 +454,7 @@ impl RawString {
     fn parse(input: &[u8], offset: usize) -> PResult<Self, ()> {
         let rest = tagged(b"<<", input)?;
         let mut cursor = rest;
-        while let &[a, b, ref rest @ ..] = cursor {
+        while let &[a, b, ..] = cursor {
             if a != b'>' || b != b'>' {
                 cursor = &cursor[1..];
             } else {
@@ -498,7 +497,6 @@ impl TextDomain {
                 idx: rest.as_ptr() as usize - input.as_ptr() as usize + offset,
                 len,
             };
-            println!("Textdomain: {}", e.get_str(name).unwrap());
             let rest = tagged(b"\n", cursor)?;
             Ok((rest, Self { name }))
         } else {
